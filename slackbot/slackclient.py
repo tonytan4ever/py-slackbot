@@ -55,16 +55,27 @@ class SlackClient(object):
         self.login_data = login_data
         self.domain = self.login_data['team']['domain']
         self.username = self.login_data['self']['name']
-        self.users = dict((u['id'], u) for u in login_data['users'])
+        self.parse_user_data(login_data['users'])
         self.parse_channel_data(login_data['channels'])
         self.parse_channel_data(login_data['groups'])
         self.parse_channel_data(login_data['ims'])
 
-        self.websocket = create_connection(self.login_data['url'])
+        proxy, proxy_port, no_proxy = None, None, None
+        if 'http_proxy' in os.environ:
+            proxy, proxy_port = os.environ['http_proxy'].split(':')
+        if 'no_proxy' in os.environ:
+            no_proxy = os.environ['no_proxy']
+
+        self.websocket = create_connection(self.login_data['url'], http_proxy_host=proxy,
+                                           http_proxy_port=proxy_port, http_no_proxy=no_proxy)
+
         self.websocket.sock.setblocking(0)
 
     def parse_channel_data(self, channel_data):
         self.channels.update({c['id']: c for c in channel_data})
+
+    def parse_user_data(self, user_data):
+        self.users.update({u['id']: u for u in user_data})
 
     def send_to_websocket(self, data):
         """Send (data) directly to the websocket."""
@@ -101,12 +112,13 @@ class SlackClient(object):
                 data.append(json.loads(d))
         return data
 
-    def rtm_send_message(self, channel, message, attachments=None):
+    def rtm_send_message(self, channel, message, attachments=None, thread_ts=None):
         message_json = {
             'type': 'message',
             'channel': channel,
             'text': message,
-            'attachments': attachments
+            'attachments': attachments,
+            'thread_ts': thread_ts,
             }
         self.send_to_websocket(message_json)
 
@@ -117,7 +129,14 @@ class SlackClient(object):
                                  filename=fname,
                                  initial_comment=comment)
 
-    def send_message(self, channel, message, attachments=None, as_user=True):
+    def upload_content(self, channel, fname, content, comment):
+        self.webapi.files.upload(None,
+                                 channels=channel,
+                                 content=content,
+                                 filename=fname,
+                                 initial_comment=comment)
+
+    def send_message(self, channel, message, attachments=None, as_user=True, thread_ts=None):
         self.webapi.chat.post_message(
                 channel,
                 message,
@@ -125,7 +144,8 @@ class SlackClient(object):
                 icon_url=self.bot_icon,
                 icon_emoji=self.bot_emoji,
                 attachments=attachments,
-                as_user=as_user)
+                as_user=as_user,
+                thread_ts=thread_ts)
 
     def get_channel(self, channel_id):
         return Channel(self, self.channels[channel_id])
@@ -138,6 +158,9 @@ class SlackClient(object):
                 name = self.users[channel['user']]['name']
             if name == channel_name:
                 return channel_id
+
+    def get_user(self, user_id):
+        return self.users.get(user_id)
 
     def find_user_by_name(self, username):
         for userid, user in iteritems(self.users):
@@ -160,10 +183,23 @@ class Channel(object):
         self._body = body
         self._client = slackclient
 
+    def __eq__(self, compare_str):
+        name = self._body['name']
+        cid = self._body['id']
+        return name == compare_str or "#" + name == compare_str or cid == compare_str
+
     def upload_file(self, fname, fpath, initial_comment=''):
         self._client.upload_file(
             self._body['id'],
             to_utf8(fname),
             to_utf8(fpath),
+            to_utf8(initial_comment)
+        )
+
+    def upload_content(self, fname, content, initial_comment=''):
+        self._client.upload_content(
+            self._body['id'],
+            to_utf8(fname),
+            to_utf8(content),
             to_utf8(initial_comment)
         )

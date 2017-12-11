@@ -48,7 +48,7 @@ class MessageDispatcher(object):
 
     def _dispatch_msg_handler(self, category, msg):
         responded = False
-        for func, args in self._plugins.get_plugins(category, msg['text']):
+        for func, args in self._plugins.get_plugins(category, msg.get('text', None)):
             if func:
                 responded = True
                 try:
@@ -77,7 +77,7 @@ class MessageDispatcher(object):
         if subtype == u'message_changed':
             return
 
-        botname = self._client.login_data['self']['name']
+        botname = self._get_bot_name()
         try:
             msguser = self._client.users.get(msg['user'])
             username = msguser['name']
@@ -103,7 +103,7 @@ class MessageDispatcher(object):
         return self._client.login_data['self']['name']
 
     def filter_text(self, msg):
-        full_text = msg.get('text', '')
+        full_text = msg.get('text', '') or ''
         channel = msg['channel']
         bot_name = self._get_bot_name()
         bot_id = self._get_bot_id()
@@ -138,9 +138,17 @@ class MessageDispatcher(object):
         while True:
             events = self._client.rtm_read()
             for event in events:
-                if event.get('type') != 'message':
-                    continue
-                self._on_new_message(event)
+                event_type = event.get('type')
+                if event_type == 'message':
+                    self._on_new_message(event)
+                elif event_type in ['channel_created', 'channel_rename',
+                                    'group_joined', 'group_rename',
+                                    'im_created']:
+                    channel = [event['channel']]
+                    self._client.parse_channel_data(channel)
+                elif event_type in ['team_join', 'user_change']:
+                    user = [event['user']]
+                    self._client.parse_user_data(user)
             time.sleep(1)
 
     def _default_reply(self, msg):
@@ -203,18 +211,21 @@ class Message(object):
             return text
 
     @unicode_compact
-    def reply_webapi(self, text, attachments=None, as_user=True):
+    def reply_webapi(self, text, attachments=None, as_user=True, in_thread=False):
         """
             Send a reply to the sender using Web API
 
             (This function supports formatted message
             when using a bot integration)
         """
-        text = self.gen_reply(text)
-        self.send_webapi(text, attachments=attachments, as_user=as_user)
+        if in_thread:
+            self.send_webapi(text, attachments=attachments, as_user=as_user, thread_ts=self.thread_ts)
+        else:
+            text = self.gen_reply(text)
+            self.send_webapi(text, attachments=attachments, as_user=as_user)
 
     @unicode_compact
-    def send_webapi(self, text, attachments=None, as_user=True):
+    def send_webapi(self, text, attachments=None, as_user=True, thread_ts=None):
         """
             Send a reply using Web API
 
@@ -225,28 +236,32 @@ class Message(object):
             self._body['channel'],
             text,
             attachments=attachments,
-            as_user=as_user)
+            as_user=as_user,
+            thread_ts=thread_ts)
 
     @unicode_compact
-    def reply(self, text):
+    def reply(self, text, in_thread=False):
         """
             Send a reply to the sender using RTM API
 
             (This function doesn't supports formatted message
             when using a bot integration)
         """
-        text = self.gen_reply(text)
-        self.send(text)
+        if in_thread:
+            self.send(text, thread_ts=self.thread_ts)
+        else:
+            text = self.gen_reply(text)
+            self.send(text)
 
     @unicode_compact
-    def send(self, text):
+    def send(self, text, thread_ts=None):
         """
             Send a reply using RTM API
 
             (This function doesn't supports formatted message
             when using a bot integration)
         """
-        self._client.rtm_send_message(self._body['channel'], text)
+        self._client.rtm_send_message(self._body['channel'], text, thread_ts=thread_ts)
 
     def react(self, emojiname):
         """
@@ -264,6 +279,19 @@ class Message(object):
     @property
     def body(self):
         return self._body
+
+    @property
+    def user(self):
+        return self._client.get_user(self._body['user'])
+
+    @property
+    def thread_ts(self):
+        try:
+            thread_ts = self.body['thread_ts']
+        except KeyError:
+            thread_ts = self.body['ts']
+
+        return thread_ts
 
     def docs_reply(self):
         reply = [u'    • `{0}` {1}'.format(v.__name__, v.__doc__ or '')
